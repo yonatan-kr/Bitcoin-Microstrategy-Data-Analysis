@@ -1,0 +1,9 @@
+version: 2
+
+sources:
+  - name: btc_raw
+    database: mstr-btc-491122
+    schema: btc_data
+    tables:
+      - name: btc_hourly_ohlcv
+        description: "Raw hourly BTC/USDT OHLCV data loaded from Binance"
