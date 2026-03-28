@@ -1,0 +1,25 @@
+name: btc-mstr-pipeline
+prefect-version: 3.x
+
+deployments:
+  - name: daily-refresh
+    version: null
+    tags: []
+    description: "Incremental BTC + MSTR data refresh and dbt model rebuild"
+    entrypoint: pipeline_flow.py:btc_mstr_pipeline
+    work_pool:
+      name: workpool
+      work_queue_name: default
+      job_variables:
+        image: prefecthq/prefect-client:3-python3.10
+        pip_packages:
+          - requests
+          - pandas
+          - yfinance
+          - google-cloud-bigquery
+          - db-dtypes
+          - dbt-bigquery
+    schedules:
+      - cron: "0 18 * * 1-5"   # 6:00 PM EST Mon–Fri (after MSTR market close)
+        timezone: America/New_York
+        active: true
