@@ -7,3 +7,7 @@ sources:
     tables:
       - name: btc_hourly_ohlcv
         description: "Raw hourly BTC/USDT OHLCV data loaded from Binance"
+      - name: mstr_hourly_ohlcv
+        description: "Raw hourly MSTR OHLCV data from yfinance (last 730 days)"
+      - name: mstr_daily_ohlcv
+        description: "Raw daily MSTR OHLCV data from yfinance (2017–present)"

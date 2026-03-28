@@ -12,7 +12,7 @@ DATASET_ID  = "btc_data"
 TABLE_ID    = "btc_hourly_ohlcv"
 SYMBOL      = "BTCUSDT"
 INTERVAL    = "1h"
-START_MS    = int(datetime(2018, 1, 1, tzinfo=EST).timestamp() * 1000)
+START_MS    = int(datetime(2017, 1, 1, tzinfo=EST).timestamp() * 1000)
 CHUNK_SIZE  = 1000          # max candles per Binance request
 BQ_TABLE    = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 # ──────────────────────────────────────────────────────────────────────────────
@@ -67,13 +67,26 @@ def fetch_chunk(start_ms: int) -> pd.DataFrame:
     return df
 
 
-def fetch_all_history() -> pd.DataFrame:
-    now_ms     = int(datetime.now(EST).timestamp() * 1000)
-    cursor_ms  = START_MS
-    chunks     = []
-    total      = 0
+def get_last_loaded_ms(client: bigquery.Client) -> int:
+    """Return the ms timestamp of the last loaded candle, or START_MS if table is empty."""
+    query = f"SELECT MAX(close_time_est) as max_ts FROM `{BQ_TABLE}`"
+    try:
+        result = list(client.query(query).result())
+        max_ts = result[0].max_ts
+        if max_ts is not None:
+            return int(pd.Timestamp(max_ts).tz_localize(EST).timestamp() * 1000) + 1
+    except Exception:
+        pass
+    return START_MS
 
-    print(f"Fetching all hourly {SYMBOL} candles from Binance...")
+
+def fetch_candles(start_ms: int) -> pd.DataFrame:
+    now_ms    = int(datetime.now(EST).timestamp() * 1000)
+    cursor_ms = start_ms
+    chunks    = []
+    total     = 0
+
+    print(f"Fetching {SYMBOL} candles from Binance...")
     while cursor_ms < now_ms:
         df = fetch_chunk(cursor_ms)
         if df.empty:
@@ -82,47 +95,57 @@ def fetch_all_history() -> pd.DataFrame:
         total     += len(df)
         cursor_ms  = int(pd.Timestamp(df["close_time_est"].iloc[-1])
                          .tz_localize(EST).timestamp() * 1000) + 1
-        pct        = min(100, (cursor_ms - START_MS) / (now_ms - START_MS) * 100)
+        pct        = min(100, (cursor_ms - start_ms) / (now_ms - start_ms) * 100)
         print(f"  {total:>7,} candles fetched  ({pct:.1f}%)  "
               f"up to {df['open_time_est'].iloc[-1].strftime('%Y-%m-%d %H:%M')} EST",
               end="\r")
 
     print()
-    return pd.concat(chunks, ignore_index=True)
+    return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
 
 
-def load_to_bigquery(df: pd.DataFrame) -> None:
-    client = bigquery.Client(project=PROJECT_ID)
-
-    # Create dataset if it doesn't exist
-    dataset_ref = bigquery.Dataset(f"{PROJECT_ID}.{DATASET_ID}")
+def load_to_bigquery(df: pd.DataFrame, client: bigquery.Client,
+                     write_disposition=bigquery.WriteDisposition.WRITE_APPEND) -> None:
+    dataset_ref          = bigquery.Dataset(f"{PROJECT_ID}.{DATASET_ID}")
     dataset_ref.location = "US"
     client.create_dataset(dataset_ref, exists_ok=True)
 
-    # Add load timestamp in EST (tz-naive for DATETIME)
     df["load_datetime_est"] = datetime.now(EST).replace(tzinfo=None)
-
-    # Enforce column order
     df = df[["open_time_est", "open", "high", "low", "close", "volume",
              "close_time_est", "quote_volume", "trades",
              "taker_buy_base", "taker_buy_quote", "load_datetime_est"]]
 
     job_config = bigquery.LoadJobConfig(
         schema=BQ_SCHEMA,
-        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+        write_disposition=write_disposition,
     )
 
-    print(f"Loading {len(df):,} rows into {BQ_TABLE} ...")
+    print(f"Loading {len(df):,} new rows into {BQ_TABLE} ...")
     job = client.load_table_from_dataframe(df, BQ_TABLE, job_config=job_config)
-    job.result()  # wait for completion
+    job.result()
 
     table = client.get_table(BQ_TABLE)
     print(f"Done. Table now has {table.num_rows:,} rows.")
 
 
 if __name__ == "__main__":
-    df = fetch_all_history()
-    print(f"\nTotal candles: {len(df):,}")
-    print(f"Date range:    {df['open_time_est'].iloc[0]}  to  {df['open_time_est'].iloc[-1]}")
-    print()
-    load_to_bigquery(df)
+    client     = bigquery.Client(project=PROJECT_ID)
+    start_ms   = get_last_loaded_ms(client)
+    start_dt   = datetime.fromtimestamp(start_ms / 1000, tz=EST)
+
+    if start_ms == START_MS:
+        print("No existing data — running full load.")
+        write_mode = bigquery.WriteDisposition.WRITE_TRUNCATE
+    else:
+        print(f"Incremental load — fetching from {start_dt.strftime('%Y-%m-%d %H:%M')} EST.")
+        write_mode = bigquery.WriteDisposition.WRITE_APPEND
+
+    df = fetch_candles(start_ms)
+
+    if df.empty:
+        print("Already up to date. No new candles to load.")
+    else:
+        print(f"\nNew candles:  {len(df):,}")
+        print(f"Range:        {df['open_time_est'].iloc[0]}  to  {df['open_time_est'].iloc[-1]}")
+        print()
+        load_to_bigquery(df, client, write_mode)
